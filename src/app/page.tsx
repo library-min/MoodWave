@@ -1,21 +1,81 @@
 'use client'
 
-import { useState, useRef } from 'react'
-import Image from 'next/image'
+import { useState, useRef, useEffect } from 'react'
 import { PlaylistResult } from '@/types'
+import { createClient } from '@/lib/supabase'
+import { saveEntry } from '@/lib/storage'
+import { User } from '@supabase/supabase-js'
+import Link from 'next/link'
 
-export default function Home() {
+type View = 'home' | 'loading' | 'result'
+type Country = 'KR' | 'JP' | 'US'
+
+const emotionColors: Record<string, string[]> = {
+  기쁨: ['#f59e0b', '#f97316', '#fbbf24'],
+  슬픔: ['#3b82f6', '#6366f1', '#0ea5e9'],
+  분노: ['#ef4444', '#f43f5e', '#f97316'],
+  불안: ['#8b5cf6', '#a855f7', '#d946ef'],
+  평온: ['#14b8a6', '#06b6d4', '#10b981'],
+  설렘: ['#ec4899', '#f43f5e', '#a855f7'],
+  피곤: ['#64748b', '#6b7280', '#71717a'],
+  기본: ['#6344a8', '#3875a8', '#a86382'],
+}
+
+export default function MoodWaveApp() {
+  const [view, setView] = useState<View>('home')
   const [text, setText] = useState('')
   const [result, setResult] = useState<PlaylistResult | null>(null)
-  const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
+  const [sharing, setSharing] = useState(false)
+  
+  const [user, setUser] = useState<User | null>(null)
+  const supabase = createClient()
+
+  const [selectedCountry, setSelectedCountry] = useState<Country>('KR')
+  const [loadingTracks, setLoadingTracks] = useState(false)
+  
   const [playingId, setPlayingId] = useState<string | null>(null)
+  const [currentTime, setCurrentTime] = useState(0)
+  const [duration, setDuration] = useState(30)
+  const [volume, setVolume] = useState(0.7)
+  const [currentTrackIndex, setCurrentTrackIndex] = useState<number | null>(null)
+  const [isPaused, setIsPaused] = useState(true)
+  
   const audioRef = useRef<HTMLAudioElement | null>(null)
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null)
+    })
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null)
+    })
+    return () => subscription.unsubscribe()
+  }, [supabase.auth])
+
+  const handleGoogleLogin = async () => {
+    await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: { redirectTo: window.location.origin }
+    })
+  }
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut()
+  }
+
+  const formatTime = (seconds: number): string => {
+    const mins = Math.floor(seconds / 60)
+    const secs = Math.floor(seconds % 60)
+    return `${mins}:${secs.toString().padStart(2, '0')}`
+  }
 
   const handleAnalyze = async () => {
     if (!text.trim()) return
-    setLoading(true)
+    setView('loading')
     setError(null)
+    setSelectedCountry('KR')
     try {
       const response = await fetch('/api/analyze', {
         method: 'POST',
@@ -23,691 +83,232 @@ export default function Home() {
         body: JSON.stringify({ text }),
       })
       const data = await response.json()
-      if (!response.ok) throw new Error(data.error)
-      setResult(data)
+      
+      if (!response.ok) {
+        const errorData = data as { error?: string }
+        throw new Error(errorData.error || '분석 중 오류가 발생했습니다.')
+      }
+      
+      const resultData = data as PlaylistResult
+      setResult(resultData)
+      setView('result')
+
+      if (user) {
+        await saveEntry({
+          date: new Date().toISOString().split('T')[0],
+          emotion: resultData.mood.emotion,
+          summary: resultData.mood.summary,
+          keywords: resultData.mood.keywords,
+          playlist_name: resultData.playlistName,
+          tracks: resultData.tracks,
+          country: 'KR'
+        })
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : '오류가 발생했어요')
-    } finally {
-      setLoading(false)
+      setError(err instanceof Error ? err.message : '네트워크 오류가 발생했습니다.')
+      setView('home')
     }
   }
 
-  const handlePlay = (track: { id: string; previewUrl: string | null }) => {
-    if (!track.previewUrl) return
-
-    // 같은 곡 누르면 정지
-    if (playingId === track.id) {
-      audioRef.current?.pause()
+  const handleCountryChange = async (country: Country) => {
+    if (!result || selectedCountry === country || loadingTracks) return
+    setSelectedCountry(country)
+    setLoadingTracks(true)
+    try {
+      const response = await fetch('/api/playlist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mood: result.mood, country }),
+      })
+      const data = await response.json()
+      if (!response.ok) throw new Error((data as { error: string }).error)
+      setResult({ ...result, tracks: data.tracks })
+      if (audioRef.current) audioRef.current.pause()
       setPlayingId(null)
+      setCurrentTrackIndex(null)
+      setIsPaused(true)
+    } catch (err) {
+      setError('음악 목록을 업데이트하지 못했습니다.')
+    } finally {
+      setLoadingTracks(false)
+    }
+  }
+
+  const handleShare = async () => {
+    if (!result || sharing) return
+    setSharing(true)
+    try {
+      const { data, error: shareError } = await supabase
+        .from('shared_playlists')
+        .insert({
+          emotion: result.mood.emotion,
+          summary: result.mood.summary,
+          keywords: result.mood.keywords,
+          playlist_name: result.playlistName,
+          tracks: result.tracks,
+        })
+        .select('id')
+        .single()
+
+      if (shareError) throw shareError
+
+      const url = `${window.location.origin}/share/${data.id}`
+      await navigator.clipboard.writeText(url)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch (e) {
+      console.error('Sharing failed', e)
+      alert('공유 링크 생성에 실패했습니다.')
+    } finally {
+      setSharing(false)
+    }
+  }
+
+  const handlePlay = (index: number) => {
+    if (!result) return
+    const track = result.tracks[index]
+    if (!track.previewUrl) return
+    if (playingId === track.id) {
+      if (audioRef.current?.paused) { audioRef.current.play(); setIsPaused(false); }
+      else { audioRef.current?.pause(); setIsPaused(true); }
       return
     }
-
-    // 다른 곡 누르면 기존 정지 후 새 곡 재생
-    if (audioRef.current) {
-      audioRef.current.pause()
-    }
-
+    if (audioRef.current) audioRef.current.pause()
     const audio = new Audio(track.previewUrl)
     audioRef.current = audio
-    audio.volume = 0.7
+    audio.volume = volume
+    audio.ontimeupdate = () => setCurrentTime(audio.currentTime)
+    audio.onloadedmetadata = () => setDuration(audio.duration)
+    audio.onended = () => handleNext()
+    audio.onplay = () => setIsPaused(false)
+    audio.onpause = () => setIsPaused(true)
     audio.play()
     setPlayingId(track.id)
-
-    // 30초 끝나면 자동 정지
-    audio.onended = () => setPlayingId(null)
+    setCurrentTrackIndex(index)
+    setIsPaused(false)
   }
 
-  const getEmoji = (emotion: string) => {
-    const map: Record<string, string> = {
-      기쁨: '😊', 슬픔: '😢', 분노: '😤',
-      불안: '😰', 평온: '😌', 설렘: '🥰', 피곤: '😴',
-    }
-    return map[emotion] ?? '🎵'
+  const handleNext = () => {
+    if (!result || currentTrackIndex === null) return
+    handlePlay((currentTrackIndex + 1) % result.tracks.length)
   }
+
+  const handlePrev = () => {
+    if (!result || currentTrackIndex === null) return
+    handlePlay((currentTrackIndex - 1 + result.tracks.length) % result.tracks.length)
+  }
+
+  const handleSeek = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!audioRef.current) return
+    const rect = e.currentTarget.getBoundingClientRect()
+    const x = e.clientX - rect.left
+    audioRef.current.currentTime = (x / rect.width) * duration
+  }
+
+  const reset = () => {
+    if (audioRef.current) audioRef.current.pause()
+    setPlayingId(null); setResult(null); setText(''); setCurrentTrackIndex(null); setIsPaused(true); setView('home'); setSelectedCountry('KR');
+  }
+
+  const currentColors = result?.mood.emotion ? (emotionColors[result.mood.emotion] || emotionColors.기본) : emotionColors.기본;
+  const currentTrack = currentTrackIndex !== null && result ? result.tracks[currentTrackIndex] : null
 
   return (
-    <>
+    <div className="mw-app">
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@300;400;500&family=DM+Serif+Display:ital@0;1&display=swap');
-
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-
-        body {
-          background: #0d0d14;
-          min-height: 100vh;
-          font-family: 'Noto Serif KR', serif;
-        }
-
-        .bg-noise {
-          position: fixed;
-          inset: 0;
-          background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
-          pointer-events: none;
-          z-index: 0;
-          opacity: 0.4;
-        }
-
-        .glow-orb {
-          position: fixed;
-          border-radius: 50%;
-          filter: blur(120px);
-          pointer-events: none;
-          z-index: 0;
-        }
-
-        .orb-1 {
-          width: 600px; height: 600px;
-          background: radial-gradient(circle, rgba(99,75,168,0.15) 0%, transparent 70%);
-          top: -200px; left: -100px;
-          animation: drift1 20s ease-in-out infinite;
-        }
-
-        .orb-2 {
-          width: 400px; height: 400px;
-          background: radial-gradient(circle, rgba(56,117,168,0.12) 0%, transparent 70%);
-          bottom: -100px; right: -100px;
-          animation: drift2 25s ease-in-out infinite;
-        }
-
-        .orb-3 {
-          width: 300px; height: 300px;
-          background: radial-gradient(circle, rgba(168,99,130,0.08) 0%, transparent 70%);
-          top: 40%; left: 60%;
-          animation: drift3 18s ease-in-out infinite;
-        }
-
-        @keyframes drift1 {
-          0%, 100% { transform: translate(0, 0); }
-          50% { transform: translate(60px, 40px); }
-        }
-        @keyframes drift2 {
-          0%, 100% { transform: translate(0, 0); }
-          50% { transform: translate(-40px, -60px); }
-        }
-        @keyframes drift3 {
-          0%, 100% { transform: translate(0, 0); }
-          33% { transform: translate(30px, -30px); }
-          66% { transform: translate(-30px, 20px); }
-        }
-
-        .mw-container {
-          position: relative;
-          z-index: 1;
-          max-width: 640px;
-          margin: 0 auto;
-          padding: 80px 24px 120px;
-        }
-
-        .mw-header { margin-bottom: 64px; animation: fadeUp 0.8s ease both; }
-
-        .mw-logo {
-          font-family: 'DM Serif Display', serif;
-          font-size: 13px;
-          letter-spacing: 0.3em;
-          text-transform: uppercase;
-          color: rgba(255,255,255,0.3);
-          margin-bottom: 32px;
-          display: flex;
-          align-items: center;
-          gap: 12px;
-        }
-
-        .mw-logo::before {
-          content: '';
-          display: block;
-          width: 24px;
-          height: 1px;
-          background: rgba(255,255,255,0.2);
-        }
-
-        .mw-title {
-          font-family: 'DM Serif Display', serif;
-          font-size: clamp(42px, 8vw, 64px);
-          color: #f0eee8;
-          line-height: 1.1;
-          letter-spacing: -0.02em;
-          margin-bottom: 16px;
-        }
-
-        .mw-title em {
-          font-style: italic;
-          background: linear-gradient(135deg, #c4a8ff, #8ab4ff, #a8d8ff);
-          -webkit-background-clip: text;
-          -webkit-text-fill-color: transparent;
-          background-clip: text;
-        }
-
-        .mw-subtitle {
-          font-size: 15px;
-          color: rgba(255,255,255,0.35);
-          font-weight: 300;
-          letter-spacing: 0.02em;
-          line-height: 1.7;
-        }
-
-        .mw-input-section {
-          animation: fadeUp 0.8s 0.15s ease both;
-          opacity: 0;
-          animation-fill-mode: forwards;
-        }
-
-        .mw-input-label {
-          font-size: 11px;
-          letter-spacing: 0.2em;
-          text-transform: uppercase;
-          color: rgba(255,255,255,0.25);
-          margin-bottom: 12px;
-          font-family: 'DM Serif Display', serif;
-        }
-
-        .mw-textarea-wrap { position: relative; }
-
-        .mw-textarea-wrap::before {
-          content: '';
-          position: absolute;
-          inset: -1px;
-          border-radius: 16px;
-          background: linear-gradient(135deg, rgba(196,168,255,0.2), rgba(138,180,255,0.1), rgba(168,216,255,0.1));
-          z-index: 0;
-        }
-
-        .mw-textarea {
-          position: relative;
-          z-index: 1;
-          width: 100%;
-          height: 160px;
-          background: rgba(255,255,255,0.03);
-          border: none;
-          border-radius: 15px;
-          padding: 20px 24px;
-          color: rgba(255,255,255,0.8);
-          font-family: 'Noto Serif KR', serif;
-          font-size: 15px;
-          font-weight: 300;
-          line-height: 1.8;
-          resize: none;
-          outline: none;
-          backdrop-filter: blur(10px);
-        }
-
-        .mw-textarea::placeholder { color: rgba(255,255,255,0.2); }
-
-        .mw-char-count {
-          text-align: right;
-          font-size: 11px;
-          color: rgba(255,255,255,0.2);
-          margin-top: 8px;
-          font-family: 'DM Serif Display', serif;
-          letter-spacing: 0.1em;
-        }
-
-        .mw-btn {
-          margin-top: 24px;
-          width: 100%;
-          padding: 18px;
-          border: none;
-          border-radius: 14px;
-          font-family: 'Noto Serif KR', serif;
-          font-size: 15px;
-          font-weight: 500;
-          letter-spacing: 0.05em;
-          cursor: pointer;
-          transition: all 0.3s ease;
-          background: linear-gradient(135deg, rgba(196,168,255,0.9), rgba(138,180,255,0.8));
-          color: #0d0d14;
-        }
-
-        .mw-btn:disabled {
-          background: rgba(255,255,255,0.06);
-          color: rgba(255,255,255,0.2);
-          cursor: not-allowed;
-        }
-
-        .mw-btn:not(:disabled):hover {
-          transform: translateY(-2px);
-          box-shadow: 0 20px 60px rgba(196,168,255,0.2);
-        }
-
-        .mw-wave {
-          display: inline-flex;
-          gap: 3px;
-          align-items: center;
-          justify-content: center;
-          height: 24px;
-        }
-
-        .mw-wave span {
-          width: 3px;
-          border-radius: 3px;
-          background: rgba(13,13,20,0.6);
-          animation: mwWave 1s ease-in-out infinite;
-        }
-
-        .mw-wave span:nth-child(1) { height: 8px;  animation-delay: 0s; }
-        .mw-wave span:nth-child(2) { height: 16px; animation-delay: 0.1s; }
-        .mw-wave span:nth-child(3) { height: 24px; animation-delay: 0.2s; }
-        .mw-wave span:nth-child(4) { height: 16px; animation-delay: 0.3s; }
-        .mw-wave span:nth-child(5) { height: 8px;  animation-delay: 0.4s; }
-        .mw-wave span:nth-child(6) { height: 20px; animation-delay: 0.15s; }
-        .mw-wave span:nth-child(7) { height: 12px; animation-delay: 0.25s; }
-
-        @keyframes mwWave {
-          0%, 100% { transform: scaleY(0.4); opacity: 0.5; }
-          50% { transform: scaleY(1); opacity: 1; }
-        }
-
-        .mw-error {
-          margin-top: 16px;
-          padding: 16px 20px;
-          border-radius: 12px;
-          background: rgba(239,68,68,0.08);
-          border: 1px solid rgba(239,68,68,0.2);
-          color: rgba(252,165,165,0.9);
-          font-size: 14px;
-          line-height: 1.6;
-        }
-
-        .mw-result { margin-top: 64px; animation: fadeUp 0.8s ease both; }
-
-        .mw-divider {
-          display: flex;
-          align-items: center;
-          gap: 16px;
-          margin-bottom: 40px;
-        }
-
-        .mw-divider::before, .mw-divider::after {
-          content: '';
-          flex: 1;
-          height: 1px;
-          background: linear-gradient(90deg, transparent, rgba(255,255,255,0.08), transparent);
-        }
-
-        .mw-divider-text {
-          font-size: 11px;
-          letter-spacing: 0.2em;
-          text-transform: uppercase;
-          color: rgba(255,255,255,0.2);
-          font-family: 'DM Serif Display', serif;
-        }
-
-        .mw-mood-card {
-          border-radius: 20px;
-          padding: 32px;
-          margin-bottom: 40px;
-          border: 1px solid rgba(255,255,255,0.06);
-          backdrop-filter: blur(20px);
-          background: rgba(255,255,255,0.02);
-          position: relative;
-          overflow: hidden;
-        }
-
-        .mw-mood-card::before {
-          content: '';
-          position: absolute;
-          inset: 0;
-          border-radius: 20px;
-          background: linear-gradient(135deg, rgba(196,168,255,0.06), transparent 60%);
-          pointer-events: none;
-        }
-
-        .mw-mood-top {
-          display: flex;
-          align-items: flex-start;
-          gap: 20px;
-          margin-bottom: 24px;
-        }
-
-        .mw-emoji { font-size: 48px; line-height: 1; flex-shrink: 0; }
-
-        .mw-emotion-name {
-          font-family: 'DM Serif Display', serif;
-          font-size: 28px;
-          color: #f0eee8;
-          margin-bottom: 6px;
-          letter-spacing: -0.01em;
-        }
-
-        .mw-emotion-summary {
-          font-size: 14px;
-          color: rgba(255,255,255,0.4);
-          font-weight: 300;
-          line-height: 1.6;
-        }
-
-        .mw-intensity-label {
-          font-size: 11px;
-          letter-spacing: 0.15em;
-          text-transform: uppercase;
-          color: rgba(255,255,255,0.2);
-          margin-bottom: 8px;
-          font-family: 'DM Serif Display', serif;
-        }
-
-        .mw-intensity-track {
-          height: 3px;
-          background: rgba(255,255,255,0.06);
-          border-radius: 2px;
-          overflow: hidden;
-          margin-bottom: 20px;
-        }
-
-        .mw-intensity-fill {
-          height: 100%;
-          border-radius: 2px;
-          background: linear-gradient(90deg, #c4a8ff, #8ab4ff);
-        }
-
-        .mw-keywords { display: flex; gap: 8px; flex-wrap: wrap; }
-
-        .mw-keyword {
-          padding: 6px 14px;
-          border-radius: 100px;
-          font-size: 12px;
-          border: 1px solid rgba(255,255,255,0.08);
-          color: rgba(255,255,255,0.5);
-          background: rgba(255,255,255,0.03);
-          letter-spacing: 0.02em;
-        }
-
-        .mw-playlist-title {
-          font-family: 'DM Serif Display', serif;
-          font-size: 22px;
-          color: #f0eee8;
-          letter-spacing: -0.01em;
-          margin-bottom: 4px;
-        }
-
-        .mw-playlist-sub {
-          font-size: 12px;
-          color: rgba(255,255,255,0.25);
-          letter-spacing: 0.05em;
-          margin-bottom: 20px;
-        }
-
-        .mw-track-list { display: flex; flex-direction: column; gap: 4px; }
-
-        .mw-track {
-          display: flex;
-          align-items: center;
-          gap: 14px;
-          padding: 12px 14px;
-          border-radius: 12px;
-          border: 1px solid transparent;
-          transition: all 0.2s ease;
-        }
-
-        .mw-track.playing {
-          background: rgba(196,168,255,0.06);
-          border-color: rgba(196,168,255,0.15);
-        }
-
-        .mw-track:not(.playing):hover {
-          background: rgba(255,255,255,0.04);
-          border-color: rgba(255,255,255,0.06);
-        }
-
-        .mw-track-num {
-          font-family: 'DM Serif Display', serif;
-          font-size: 12px;
-          color: rgba(255,255,255,0.15);
-          width: 20px;
-          text-align: center;
-          flex-shrink: 0;
-        }
-
-        .mw-track.playing .mw-track-num { color: rgba(196,168,255,0.6); }
-
-        .mw-track-img { border-radius: 8px; flex-shrink: 0; opacity: 0.85; }
-        .mw-track.playing .mw-track-img { opacity: 1; }
-
-        .mw-track-info { flex: 1; min-width: 0; }
-
-        .mw-track-name {
-          font-size: 14px;
-          color: rgba(255,255,255,0.75);
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          margin-bottom: 3px;
-        }
-
-        .mw-track.playing .mw-track-name { color: rgba(255,255,255,0.95); }
-
-        .mw-track-artist {
-          font-size: 12px;
-          color: rgba(255,255,255,0.3);
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
-        }
-
-        .mw-track-actions {
-          display: flex;
-          align-items: center;
-          gap: 8px;
-          flex-shrink: 0;
-        }
-
-        .mw-play-btn {
-          width: 32px;
-          height: 32px;
-          border-radius: 50%;
-          border: 1px solid rgba(255,255,255,0.12);
-          background: rgba(255,255,255,0.04);
-          color: rgba(255,255,255,0.5);
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          cursor: pointer;
-          transition: all 0.2s ease;
-          font-size: 11px;
-          flex-shrink: 0;
-        }
-
-        .mw-play-btn:hover {
-          background: rgba(196,168,255,0.15);
-          border-color: rgba(196,168,255,0.4);
-          color: rgba(196,168,255,0.9);
-        }
-
-        .mw-play-btn.active {
-          background: rgba(196,168,255,0.2);
-          border-color: rgba(196,168,255,0.5);
-          color: rgba(196,168,255,1);
-        }
-
-        .mw-play-btn.no-preview {
-          opacity: 0.2;
-          cursor: not-allowed;
-        }
-
-        .mw-play-btn.no-preview:hover {
-          background: rgba(255,255,255,0.04);
-          border-color: rgba(255,255,255,0.12);
-          color: rgba(255,255,255,0.5);
-        }
-
-        .mw-itunes-link {
-          font-size: 11px;
-          color: rgba(255,255,255,0.15);
-          text-decoration: none;
-          transition: color 0.2s;
-          letter-spacing: 0.05em;
-        }
-
-        .mw-itunes-link:hover { color: rgba(196,168,255,0.5); }
-
-        .mw-playing-bar {
-          display: inline-flex;
-          gap: 2px;
-          align-items: center;
-        }
-
-        .mw-playing-bar span {
-          width: 2px;
-          border-radius: 2px;
-          background: rgba(196,168,255,0.8);
-          animation: mwWave 0.8s ease-in-out infinite;
-        }
-
-        .mw-playing-bar span:nth-child(1) { height: 6px; animation-delay: 0s; }
-        .mw-playing-bar span:nth-child(2) { height: 10px; animation-delay: 0.15s; }
-        .mw-playing-bar span:nth-child(3) { height: 7px; animation-delay: 0.3s; }
-
-        .mw-preview-badge {
-          font-size: 10px;
-          color: rgba(255,255,255,0.15);
-          letter-spacing: 0.05em;
-          margin-top: 12px;
-          text-align: center;
-          font-family: 'DM Serif Display', serif;
-        }
-
-        .mw-timestamp {
-          text-align: center;
-          margin-top: 48px;
-          font-size: 11px;
-          letter-spacing: 0.15em;
-          color: rgba(255,255,255,0.1);
-          font-family: 'DM Serif Display', serif;
-        }
-
-        @keyframes fadeUp {
-          from { opacity: 0; transform: translateY(24px); }
-          to { opacity: 1; transform: translateY(0); }
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@200;400;700&family=DM+Serif+Display&display=swap');
+        :root { --bg: #0d0d14; --accent-start: #c4a8ff; --accent-end: #8ab4ff; --text-main: #f0eee8; --text-sub: rgba(240, 238, 232, 0.35); --glass: rgba(255, 255, 255, 0.04); --glass-border: rgba(255, 255, 255, 0.08); }
+        * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+        body { background: var(--bg); color: var(--text-main); font-family: 'Noto Serif KR', serif; overflow-x: hidden; width: 100%; }
+        .mw-app { position: relative; min-height: 100vh; width: 100%; display: flex; flex-direction: column; align-items: center; padding-bottom: ${currentTrack ? '80px' : '0'}; }
+        .mw-background { position: fixed; inset: 0; z-index: 0; background: radial-gradient(circle at 50% 50%, #1a1a2e 0%, #0d0d14 100%); overflow: hidden; }
+        .mw-glow-layer { position: absolute; inset: -10%; filter: blur(150px); opacity: 0.6; }
+        .mw-orb { position: absolute; border-radius: 50%; mix-blend-mode: screen; will-change: transform; transition: background 2s ease; }
+        .orb-1 { width: 60vw; height: 60vw; top: -15%; left: -10%; animation: drift 25s infinite alternate ease-in-out; }
+        .orb-2 { width: 55vw; height: 55vw; bottom: -10%; right: -5%; animation: drift 30s infinite alternate-reverse ease-in-out; }
+        .orb-3 { width: 45vw; height: 45vw; top: 30%; left: 45%; animation: drift 22s infinite alternate ease-in-out -5s; }
+        @keyframes drift { from { transform: translate(0, 0) scale(1); } to { transform: translate(40px, 30px) scale(1.1); } }
+        .mw-auth-bar { position: absolute; top: 24px; right: 24px; z-index: 100; display: flex; align-items: center; gap: 12px; }
+        .mw-login-btn { background: rgba(255,255,255,0.06); border: 1px solid var(--glass-border); color: white; padding: 10px 18px; border-radius: 100px; cursor: pointer; font-size: 13px; backdrop-filter: blur(10px); }
+        .mw-user-avatar { width: 36px; height: 32px; border-radius: 50%; background: var(--accent-start); color: #0d0d14; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 13px; }
+        .mw-container { position: relative; z-index: 10; width: 100%; max-width: 800px; padding: 100px 24px; display: flex; flex-direction: column; flex: 1; }
+        .mw-brand { font-family: 'DM Serif Display', serif; font-size: 13px; letter-spacing: 0.4em; color: var(--text-sub); margin-bottom: 60px; display: flex; align-items: center; gap: 16px; text-transform: uppercase; }
+        .mw-brand::before { content: ''; display: block; width: 30px; height: 1px; background: rgba(255,255,255,0.2); }
+        .mw-main-title { font-family: 'DM Serif Display', serif; font-size: clamp(34px, 10vw, 64px); line-height: 1.15; margin-bottom: 24px; word-break: keep-all; }
+        .mw-sub-text { font-size: 17px; color: var(--text-sub); font-weight: 300; margin-bottom: 80px; line-height: 1.7; max-width: 500px; }
+        .mw-input-wrap { width: 100%; margin-bottom: 32px; }
+        .mw-input { width: 100%; background: transparent; border: none; border-bottom: 1px solid rgba(255,255,255,0.15); padding: 20px 0; font-size: 22px; color: var(--text-main); outline: none; transition: border-color 0.4s ease; border-radius: 0; }
+        .mw-input:focus { border-bottom-color: var(--accent-start); }
+        .mw-btn-analyze { width: 100%; padding: 22px; border-radius: 100px; border: none; background: linear-gradient(135deg, var(--accent-start), var(--accent-end)); color: #0d0d14; font-size: 17px; font-weight: 700; cursor: pointer; transition: all 0.3s; display: flex; align-items: center; justify-content: center; gap: 10px; }
+        .mw-btn-analyze:disabled { opacity: 0.5; }
+        .mw-loading-view { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
+        .mw-loading-card { width: min(320px, 80vw); height: min(320px, 80vw); background: var(--glass); backdrop-filter: blur(30px); border-radius: 50px; border: 1px solid var(--glass-border); display: flex; align-items: center; justify-content: center; margin-bottom: 48px; }
+        .mw-bar { width: 5px; background: var(--accent-start); border-radius: 10px; animation: wave 1.2s ease-in-out infinite; }
+        @keyframes wave { 0%, 100% { transform: scaleY(0.25); opacity: 0.4; } 50% { transform: scaleY(1); opacity: 1; } }
+        .mw-emotion-card { background: var(--glass); backdrop-filter: blur(30px); border-radius: 32px; padding: min(48px, 8vw); border: 1px solid var(--glass-border); margin-bottom: 64px; }
+        .mw-country-tabs { display: flex; gap: 8px; margin-bottom: 32px; overflow-x: auto; padding-bottom: 4px; -ms-overflow-style: none; scrollbar-width: none; }
+        .mw-country-tab { padding: 10px 20px; border-radius: 100px; border: 1px solid var(--glass-border); background: transparent; color: var(--text-sub); font-size: 13px; cursor: pointer; white-space: nowrap; }
+        .mw-country-tab.active { background: var(--accent-start); color: #0d0d14; border-color: var(--accent-start); font-weight: 600; }
+        .mw-track { display: flex; align-items: center; gap: 16px; padding: 16px; border-radius: 20px; transition: all 0.3s; cursor: pointer; position: relative; overflow: hidden; background: rgba(255,255,255,0.02); margin-bottom: 8px; }
+        .mw-album-art { width: 56px; height: 56px; border-radius: 12px; flex-shrink: 0; }
+        .mw-track-progress { position: absolute; bottom: 0; left: 0; height: 2px; background: var(--accent-start); }
+        .mw-player { position: fixed; bottom: 0; left: 0; right: 0; height: 80px; background: rgba(13, 13, 20, 0.85); backdrop-filter: blur(30px); border-top: 1px solid rgba(255,255,255,0.1); display: flex; align-items: center; padding: 0 20px; z-index: 1000; gap: 12px; }
+        .mw-player-info { display: flex; align-items: center; gap: 12px; flex: 1; min-width: 0; }
+        .mw-player-title { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .mw-player-artist { font-size: 12px; color: var(--text-sub); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .mw-player-seek { position: absolute; top: 0; left: 0; right: 0; height: 3px; background: rgba(255,255,255,0.1); cursor: pointer; }
+        .mw-player-seek-bar { height: 100%; background: var(--accent-start); }
+        .mw-toast { position: fixed; bottom: 100px; left: 50%; transform: translateX(-50%); background: rgba(255, 255, 255, 0.1); backdrop-filter: blur(20px); color: white; padding: 12px 24px; border-radius: 100px; font-size: 14px; border: 1px solid rgba(255, 255, 255, 0.1); z-index: 2000; }
+        @media (max-width: 600px) {
+          .mw-auth-bar { top: 16px; right: 16px; }
+          .mw-container { padding: 80px 20px; }
+          .mw-main-title { font-size: 34px; }
+          .mw-player-volume, .mw-player-time { display: none; }
+          .mw-share-btn span { display: none; }
+          .mw-share-btn { padding: 10px; }
         }
       `}</style>
-
-      <div className="bg-noise" />
-      <div className="glow-orb orb-1" />
-      <div className="glow-orb orb-2" />
-      <div className="glow-orb orb-3" />
-
+      <div className="mw-background"><div className="mw-glow-layer"><div className="mw-orb orb-1" style={{ background: `radial-gradient(circle, ${currentColors[0]}26 0%, transparent 70%)` }} /><div className="mw-orb orb-2" style={{ background: `radial-gradient(circle, ${currentColors[1]}26 0%, transparent 70%)` }} /><div className="mw-orb orb-3" style={{ background: `radial-gradient(circle, ${currentColors[2]}26 0%, transparent 70%)` }} /></div></div>
+      <div className="mw-auth-bar">{user ? (<><div className="mw-user-avatar">{user.email?.charAt(0).toUpperCase()}</div><button className="mw-login-btn" onClick={handleLogout}>로그아웃</button></>) : (<button className="mw-login-btn" onClick={handleGoogleLogin}>Google로 시작</button>)}</div>
       <div className="mw-container">
-        <div className="mw-header">
-          <div className="mw-logo">MoodWave</div>
-          <h1 className="mw-title">오늘의 감정을<br /><em>음악으로</em></h1>
-          <p className="mw-subtitle">지금 이 순간의 감정을 써내려가세요.<br />당신의 새벽을 채울 음악을 찾아드릴게요.</p>
-        </div>
-
-        <div className="mw-input-section">
-          <div className="mw-input-label">오늘의 일기</div>
-          <div className="mw-textarea-wrap">
-            <textarea
-              className="mw-textarea"
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              placeholder={"오늘 하루 어땠나요\n감정을 자유롭게 써보세요..."}
-              maxLength={500}
-            />
+        {view === 'home' && (
+          <div className="fade-up">
+            <div className="mw-brand">— MoodWave</div>
+            <h1 className="mw-main-title">당신의 감정을<br />음악으로</h1>
+            <p className="mw-sub-text">지금 느끼는 감정을 한 문장으로 들려주세요.<br />완벽한 음악을 찾아드릴게요.</p>
+            <div className="mw-input-wrap"><input className="mw-input" value={text} onChange={(e) => setText(e.target.value)} placeholder="예: 고요한 새벽, 혼자만의 시간" onKeyDown={(e) => e.key === 'Enter' && handleAnalyze()} autoFocus /></div>
+            <button className="mw-btn-analyze" onClick={handleAnalyze} disabled={!text.trim()}>✦ 감정 분석하기</button>
+            {error && <p style={{marginTop: '24px', color: '#ff8ab4', fontSize: '15px', textAlign: 'center'}}>{error}</p>}
+            {user && (<Link href="/history" style={{display:'block', textAlign:'center', marginTop:40, color:'var(--text-sub)', textDecoration:'none', fontSize:14}}>📅 감정 기록 보기 →</Link>)}
           </div>
-          <div className="mw-char-count">{text.length} / 500</div>
-
-          <button
-            className="mw-btn"
-            onClick={handleAnalyze}
-            disabled={loading || !text.trim()}
-          >
-            {loading ? (
-              <span className="mw-wave">
-                <span /><span /><span /><span /><span /><span /><span />
-              </span>
-            ) : '음악 찾기'}
-          </button>
-
-          {error && <div className="mw-error">{error}</div>}
-        </div>
-
-        {result && (
-          <div className="mw-result">
-            <div className="mw-divider">
-              <span className="mw-divider-text">분석 결과</span>
+        )}
+        {view === 'loading' && (
+          <div className="mw-loading-view fade-up">
+            <h2 style={{fontFamily:'DM Serif Display', fontSize:'26px', marginBottom:'60px'}}>감정을 분석하고 있어요</h2>
+            <div className="mw-loading-card"><div style={{display:'flex', gap:'10px', height:'100px', alignItems:'center'}}>{[...Array(9)].map((_, i) => (<div key={i} className="mw-bar" style={{ height: `${[40, 70, 50, 90, 60, 80, 45, 65, 40][i]}px`, animationDelay: `${i * 0.1}s` }} />))}</div></div>
+            <p style={{fontSize:'14px', color:'var(--text-sub)', letterSpacing:'0.1em'}}>잠시만 기다려주세요...</p>
+          </div>
+        )}
+        {view === 'result' && result && (
+          <div className="fade-up">
+            <button onClick={reset} style={{background:'rgba(255,255,255,0.06)', border:'1px solid var(--glass-border)', color:'white', padding:'10px 20px', borderRadius:'100px', cursor:'pointer', marginBottom:'40px'}}>🏠 처음으로</button>
+            <h2 style={{fontFamily:'DM Serif Display', fontSize:'40px', marginBottom:'32px'}}>당신의 감정</h2>
+            <div className="mw-emotion-card"><div style={{display:'flex', alignItems:'baseline', gap:'16px', marginBottom:'20px'}}><span style={{fontSize:'32px', fontWeight:'700'}}>{result.mood.emotion}</span><span style={{fontSize:'15px', color:'var(--accent-start)'}}>#{result.mood.keywords.join(' #')}</span></div><p style={{fontSize:'17px', lineHeight:'1.8', color:'rgba(240, 238, 232, 0.8)', fontWeight:'300'}}>{result.mood.summary}</p></div>
+            <div className="mw-country-tabs">
+              {['KR', 'JP', 'US'].map((c) => (<button key={c} className={`mw-country-tab ${selectedCountry === c ? 'active' : ''}`} onClick={() => handleCountryChange(c as Country)}>{c === 'KR' ? '🇰🇷 한국' : c === 'JP' ? '🇯🇵 일본' : '🌍 글로벌'}</button>))}
             </div>
-
-            <div className="mw-mood-card">
-              <div className="mw-mood-top">
-                <div className="mw-emoji">{getEmoji(result.mood.emotion)}</div>
-                <div>
-                  <div className="mw-emotion-name">{result.mood.emotion}</div>
-                  <div className="mw-emotion-summary">{result.mood.summary}</div>
-                </div>
-              </div>
-
-              <div className="mw-intensity-label">감정 강도</div>
-              <div className="mw-intensity-track">
-                <div className="mw-intensity-fill" style={{ width: `${result.mood.intensity * 10}%` }} />
-              </div>
-
-              <div className="mw-keywords">
-                {result.mood.keywords.map((keyword) => (
-                  <span key={keyword} className="mw-keyword">{keyword}</span>
-                ))}
-              </div>
+            <div style={{display:'flex', justifyContent:'space-between', alignItems:'flex-end', marginBottom:'24px'}}><h3 style={{fontSize:'13px', letterSpacing:'0.2em', color:'var(--text-sub)', textTransform:'uppercase'}}>Recommended Playlist</h3><button className={`mw-share-btn ${copied ? 'copied' : ''}`} onClick={handleShare} disabled={sharing} style={{background:'transparent', border:`1px solid ${copied ? '#10b981' : 'var(--accent-start)'}`, color: copied ? '#10b981' : 'var(--accent-start)', padding:'8px 16px', borderRadius:'100px', cursor:'pointer', fontSize:'12px'}}>{sharing ? '생성 중...' : copied ? '복사됨 ✓' : '🔗 공유하기'}</button></div>
+            <div style={{display:'flex', flexDirection:'column', gap:'10px'}}>
+              {loadingTracks ? ([...Array(4)].map((_, i) => <div key={i} style={{height:80, background:'rgba(255,255,255,0.03)', borderRadius:20}} />)) : (result.tracks.map((track, idx) => (<div key={track.id} className={`mw-track ${playingId === track.id ? 'playing' : ''}`} onClick={() => handlePlay(idx)}><img src={track.albumImage || ''} className="mw-album-art" alt="" /><div style={{flex:1, minWidth:0}}><div className="mw-player-title" style={{fontSize:15}}>{track.name}</div><div className="mw-player-artist" style={{fontSize:13}}>{track.artist} · {track.album}</div></div><div style={{fontSize:14}}>{playingId === track.id && !isPaused ? '■' : '▶'}</div>{playingId === track.id && (<div className="mw-track-progress" style={{ width: `${(currentTime / duration) * 100}%` }} />)}</div>)))}
             </div>
-
-            <div className="mw-playlist-title">{result.playlistName}</div>
-            <div className="mw-playlist-sub">{result.tracks.length}곡 · {result.mood.genre.join(', ')}</div>
-
-            <div className="mw-track-list">
-              {result.tracks.map((track, index) => (
-                <div
-                  key={track.id}
-                  className={`mw-track ${playingId === track.id ? 'playing' : ''}`}
-                >
-                  <span className="mw-track-num">
-                    {playingId === track.id ? (
-                      <span className="mw-playing-bar">
-                        <span /><span /><span />
-                      </span>
-                    ) : (
-                      index + 1
-                    )}
-                  </span>
-
-                  <Image
-                    src={track.albumImage || '/placeholder.png'}
-                    alt={track.album}
-                    width={44}
-                    height={44}
-                    className="mw-track-img"
-                    style={{ borderRadius: '8px' }}
-                  />
-
-                  <div className="mw-track-info">
-                    <div className="mw-track-name">{track.name}</div>
-                    <div className="mw-track-artist">{track.artist}</div>
-                  </div>
-
-                  <div className="mw-track-actions">
-                    <button
-                      className={`mw-play-btn ${playingId === track.id ? 'active' : ''} ${!track.previewUrl ? 'no-preview' : ''}`}
-                      onClick={() => handlePlay(track)}
-                      title={!track.previewUrl ? '미리듣기 없음' : playingId === track.id ? '정지' : '재생'}
-                    >
-                      {playingId === track.id ? '■' : '▶'}
-                    </button>
-                    <a
-                      href={track.spotifyUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="mw-itunes-link"
-                    >
-                      iTunes ↗
-                    </a>
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            <div className="mw-preview-badge">▶ 버튼으로 30초 미리듣기 가능</div>
-
-            <div className="mw-timestamp">
-              {new Date().toLocaleDateString('ko-KR', { year: 'numeric', month: 'long', day: 'numeric' })}
-            </div>
+            {user && (<Link href="/history" style={{display:'block', textAlign:'center', marginTop:60, color:'var(--text-sub)', textDecoration:'none', fontSize:14}}>📅 감정 기록 보기 →</Link>)}
           </div>
         )}
       </div>
-    </>
+      {copied && <div className="mw-toast">링크가 복사됐어요 ✓</div>}
+      {currentTrack && (
+        <div className="mw-player fade-up"><div className="mw-player-seek" onClick={handleSeek}><div className="mw-player-seek-bar" style={{ width: `${(currentTime / duration) * 100}%` }} /></div><div className="mw-player-info"><img src={currentTrack.albumImage || ''} style={{width:48, height:48, borderRadius:8}} alt="" /><div style={{minWidth:0}}><div className="mw-player-title">{currentTrack.name}</div><div className="mw-player-artist">{currentTrack.artist}</div></div></div><div style={{display:'flex', gap:'20px', alignItems:'center'}}><button onClick={handlePrev} style={{background:'none', border:'none', color:'white', cursor:'pointer', fontSize:18}}>⏮</button><button onClick={() => currentTrackIndex !== null && handlePlay(currentTrackIndex)} style={{background:'none', border:'none', color:'white', cursor:'pointer', fontSize:24}}>{isPaused ? '▶' : '■'}</button><button onClick={handleNext} style={{background:'none', border:'none', color:'white', cursor:'pointer', fontSize:18}}>⏭</button></div><div className="mw-player-time" style={{fontSize:12, opacity:0.5, minWidth:80, textAlign:'center'}}>{formatTime(currentTime)} / {formatTime(duration)}</div></div>
+      )}
+    </div>
   )
 }
