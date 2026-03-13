@@ -51,7 +51,15 @@ export default function MoodWaveApp() {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setUser(session?.user ?? null)
     })
-    return () => subscription.unsubscribe()
+    
+    // 컴포넌트 언마운트 시 오디오 정지
+    return () => {
+      subscription.unsubscribe()
+      if (audioRef.current) {
+        audioRef.current.pause()
+        audioRef.current = null
+      }
+    }
   }, [supabase.auth])
 
   const handleGoogleLogin = async () => {
@@ -188,6 +196,14 @@ export default function MoodWaveApp() {
     setIsPaused(false)
   }
 
+  const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = parseFloat(e.target.value)
+    setVolume(val)
+    if (audioRef.current) {
+      audioRef.current.volume = val
+    }
+  }
+
   const handleNext = () => {
     if (!result || currentTrackIndex === null) return
     handlePlay((currentTrackIndex + 1) % result.tracks.length)
@@ -269,7 +285,7 @@ export default function MoodWaveApp() {
         }
       `}</style>
       <div className="mw-background"><div className="mw-glow-layer"><div className="mw-orb orb-1" style={{ background: `radial-gradient(circle, ${currentColors[0]}26 0%, transparent 70%)` }} /><div className="mw-orb orb-2" style={{ background: `radial-gradient(circle, ${currentColors[1]}26 0%, transparent 70%)` }} /><div className="mw-orb orb-3" style={{ background: `radial-gradient(circle, ${currentColors[2]}26 0%, transparent 70%)` }} /></div></div>
-      <div className="mw-auth-bar">{user ? (<><div className="mw-user-avatar">{user.email?.charAt(0).toUpperCase()}</div><button className="mw-login-btn" onClick={handleLogout}>로그아웃</button></>) : (<button className="mw-login-btn" onClick={handleGoogleLogin}>Google로 시작</button>)}</div>
+      <div className="mw-auth-bar">{user ? (<><div className="mw-user-avatar">{user.email?.charAt(0).toUpperCase()}</div><button className="mw-login-btn" onClick={handleLogout}>로그아웃</button></>) : (<button className="mw-login-btn" onClick={handleGoogleLogin}>구글로 시작</button>)}</div>
       <div className="mw-container">
         {view === 'home' && (
           <div className="fade-up">
@@ -277,9 +293,9 @@ export default function MoodWaveApp() {
             <h1 className="mw-main-title">당신의 감정을<br />음악으로</h1>
             <p className="mw-sub-text">지금 느끼는 감정을 한 문장으로 들려주세요.<br />완벽한 음악을 찾아드릴게요.</p>
             <div className="mw-input-wrap"><input className="mw-input" value={text} onChange={(e) => setText(e.target.value)} placeholder="예: 고요한 새벽, 혼자만의 시간" onKeyDown={(e) => e.key === 'Enter' && handleAnalyze()} autoFocus /></div>
-            <button className="mw-btn-analyze" onClick={handleAnalyze} disabled={!text.trim()}>✦ 감정 분석하기</button>
+            <button className="mw-btn-analyze" onClick={handleAnalyze} disabled={!text.trim()}>감정 분석하기</button>
             {error && <p style={{marginTop: '24px', color: '#ff8ab4', fontSize: '15px', textAlign: 'center'}}>{error}</p>}
-            {user && (<Link href="/history" style={{display:'block', textAlign:'center', marginTop:40, color:'var(--text-sub)', textDecoration:'none', fontSize:14}}>📅 감정 기록 보기 →</Link>)}
+            {user && (<Link href="/history" style={{display:'block', textAlign:'center', marginTop:40, color:'var(--text-sub)', textDecoration:'none', fontSize:14}}>감정 기록 보기 →</Link>)}
           </div>
         )}
         {view === 'loading' && (
@@ -291,23 +307,53 @@ export default function MoodWaveApp() {
         )}
         {view === 'result' && result && (
           <div className="fade-up">
-            <button onClick={reset} style={{background:'rgba(255,255,255,0.06)', border:'1px solid var(--glass-border)', color:'white', padding:'10px 20px', borderRadius:'100px', cursor:'pointer', marginBottom:'40px'}}>🏠 처음으로</button>
+            <button onClick={reset} style={{background:'rgba(255,255,255,0.06)', border:'1px solid var(--glass-border)', color:'white', padding:'10px 20px', borderRadius:'100px', cursor:'pointer', marginBottom:'40px'}}>←</button>
             <h2 style={{fontFamily:'DM Serif Display', fontSize:'40px', marginBottom:'32px'}}>당신의 감정</h2>
             <div className="mw-emotion-card"><div style={{display:'flex', alignItems:'baseline', gap:'16px', marginBottom:'20px'}}><span style={{fontSize:'32px', fontWeight:'700'}}>{result.mood.emotion}</span><span style={{fontSize:'15px', color:'var(--accent-start)'}}>#{result.mood.keywords.join(' #')}</span></div><p style={{fontSize:'17px', lineHeight:'1.8', color:'rgba(240, 238, 232, 0.8)', fontWeight:'300'}}>{result.mood.summary}</p></div>
             <div className="mw-country-tabs">
-              {['KR', 'JP', 'US'].map((c) => (<button key={c} className={`mw-country-tab ${selectedCountry === c ? 'active' : ''}`} onClick={() => handleCountryChange(c as Country)}>{c === 'KR' ? '🇰🇷 한국' : c === 'JP' ? '🇯🇵 일본' : '🌍 글로벌'}</button>))}
+              {['KR', 'JP', 'US'].map((c) => (<button key={c} className={`mw-country-tab ${selectedCountry === c ? 'active' : ''}`} onClick={() => handleCountryChange(c as Country)}>{c === 'KR' ? '한국' : c === 'JP' ? '일본' : '글로벌'}</button>))}
             </div>
             <div style={{display:'flex', justifyContent:'space-between', alignItems:'flex-end', marginBottom:'24px'}}><h3 style={{fontSize:'13px', letterSpacing:'0.2em', color:'var(--text-sub)', textTransform:'uppercase'}}>Recommended Playlist</h3><button className={`mw-share-btn ${copied ? 'copied' : ''}`} onClick={handleShare} disabled={sharing} style={{background:'transparent', border:`1px solid ${copied ? '#10b981' : 'var(--accent-start)'}`, color: copied ? '#10b981' : 'var(--accent-start)', padding:'8px 16px', borderRadius:'100px', cursor:'pointer', fontSize:'12px'}}>{sharing ? '생성 중...' : copied ? '복사됨 ✓' : '🔗 공유하기'}</button></div>
             <div style={{display:'flex', flexDirection:'column', gap:'10px'}}>
               {loadingTracks ? ([...Array(4)].map((_, i) => <div key={i} style={{height:80, background:'rgba(255,255,255,0.03)', borderRadius:20}} />)) : (result.tracks.map((track, idx) => (<div key={track.id} className={`mw-track ${playingId === track.id ? 'playing' : ''}`} onClick={() => handlePlay(idx)}><img src={track.albumImage || ''} className="mw-album-art" alt="" /><div style={{flex:1, minWidth:0}}><div className="mw-player-title" style={{fontSize:15}}>{track.name}</div><div className="mw-player-artist" style={{fontSize:13}}>{track.artist} · {track.album}</div></div><div style={{fontSize:14}}>{playingId === track.id && !isPaused ? '■' : '▶'}</div>{playingId === track.id && (<div className="mw-track-progress" style={{ width: `${(currentTime / duration) * 100}%` }} />)}</div>)))}
             </div>
-            {user && (<Link href="/history" style={{display:'block', textAlign:'center', marginTop:60, color:'var(--text-sub)', textDecoration:'none', fontSize:14}}>📅 감정 기록 보기 →</Link>)}
+            {user && (<Link href="/history" style={{display:'block', textAlign:'center', marginTop:60, color:'var(--text-sub)', textDecoration:'none', fontSize:14}}>감정 기록 보기 →</Link>)}
           </div>
         )}
       </div>
       {copied && <div className="mw-toast">링크가 복사됐어요 ✓</div>}
       {currentTrack && (
-        <div className="mw-player fade-up"><div className="mw-player-seek" onClick={handleSeek}><div className="mw-player-seek-bar" style={{ width: `${(currentTime / duration) * 100}%` }} /></div><div className="mw-player-info"><img src={currentTrack.albumImage || ''} style={{width:48, height:48, borderRadius:8}} alt="" /><div style={{minWidth:0}}><div className="mw-player-title">{currentTrack.name}</div><div className="mw-player-artist">{currentTrack.artist}</div></div></div><div style={{display:'flex', gap:'20px', alignItems:'center'}}><button onClick={handlePrev} style={{background:'none', border:'none', color:'white', cursor:'pointer', fontSize:18}}>⏮</button><button onClick={() => currentTrackIndex !== null && handlePlay(currentTrackIndex)} style={{background:'none', border:'none', color:'white', cursor:'pointer', fontSize:24}}>{isPaused ? '▶' : '■'}</button><button onClick={handleNext} style={{background:'none', border:'none', color:'white', cursor:'pointer', fontSize:18}}>⏭</button></div><div className="mw-player-time" style={{fontSize:12, opacity:0.5, minWidth:80, textAlign:'center'}}>{formatTime(currentTime)} / {formatTime(duration)}</div></div>
+        <div className="mw-player fade-up">
+          <div className="mw-player-seek" onClick={handleSeek}>
+            <div className="mw-player-seek-bar" style={{ width: `${(currentTime / duration) * 100}%` }} />
+          </div>
+          <div className="mw-player-info">
+            <img src={currentTrack.albumImage || ''} style={{width:48, height:48, borderRadius:8}} alt="" />
+            <div style={{minWidth:0}}>
+              <div className="mw-player-title">{currentTrack.name}</div>
+              <div className="mw-player-artist">{currentTrack.artist}</div>
+            </div>
+          </div>
+          
+          <div className="mw-player-volume" style={{ display: 'flex', alignItems: 'center', gap: '8px', marginRight: '16px' }}>
+            <span style={{ fontSize: '10px', opacity: 0.4, textTransform: 'uppercase' }}>Vol</span>
+            <input 
+              type="range" min="0" max="1" step="0.01" 
+              value={volume} onChange={handleVolumeChange}
+              style={{ width: '60px', accentColor: '#c4a8ff', cursor: 'pointer' }}
+            />
+          </div>
+
+          <div style={{display:'flex', gap:'20px', alignItems:'center'}}>
+            <button onClick={handlePrev} style={{background:'none', border:'none', color:'white', cursor:'pointer', fontSize:18}}>⏮</button>
+            <button onClick={() => currentTrackIndex !== null && handlePlay(currentTrackIndex)} style={{background:'none', border:'none', color:'white', cursor:'pointer', fontSize:24}}>{isPaused ? '▶' : '■'}</button>
+            <button onClick={handleNext} style={{background:'none', border:'none', color:'white', cursor:'pointer', fontSize:18}}>⏭</button>
+          </div>
+          
+          <div className="mw-player-time" style={{fontSize:12, opacity:0.5, minWidth:80, textAlign:'center'}}>
+            {formatTime(currentTime)} / {formatTime(duration)}
+          </div>
+        </div>
       )}
     </div>
   )
