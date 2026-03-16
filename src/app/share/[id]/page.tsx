@@ -3,7 +3,6 @@ import Link from 'next/link'
 import { createClient } from '@supabase/supabase-js'
 import { Track } from '@/types'
 
-// Supabase 테이블 구조에 맞춘 타입 정의
 interface SharedPlaylist {
   id: string
   emotion: string
@@ -14,16 +13,17 @@ interface SharedPlaylist {
   created_at: string
 }
 
-// 서버용 Supabase 클라이언트 설정
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-const supabase = createClient(supabaseUrl, supabaseAnonKey)
-
 interface Props {
   params: Promise<{ id: string }>
 }
 
 async function getSharedData(id: string): Promise<SharedPlaylist | null> {
+  // ✅ 함수 안에서 클라이언트 생성 (빌드 타임 환경변수 오류 방지)
+  const supabase = createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  )
+
   const { data, error } = await supabase
     .from('shared_playlists')
     .select('*')
@@ -37,7 +37,7 @@ async function getSharedData(id: string): Promise<SharedPlaylist | null> {
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
   const { id } = await params
   const data = await getSharedData(id)
-  
+
   if (!data) return { title: 'MoodWave' }
 
   return {
@@ -90,25 +90,32 @@ export default async function SharePage({ params }: Props) {
 
       <div className="mw-inner">
         <div className="mw-banner">🎵 MoodWave가 플레이리스트를 공유했어요</div>
-        
+
         <div className="mw-emotion-card">
-          <div style={{display:'flex', alignItems:'baseline'}}>
+          <div style={{ display: 'flex', alignItems: 'baseline' }}>
             <span className="mw-emotion-name">{result.emotion}</span>
             <span className="mw-emotion-tag">#{result.keywords.join(' #')}</span>
           </div>
           <p className="mw-emotion-desc">{result.summary}</p>
         </div>
 
-        <h3 style={{fontSize:'13px', letterSpacing:'0.2em', color:'rgba(255, 255, 255, 0.3)', textTransform:'uppercase', marginBottom:'24px'}}>Shared Playlist</h3>
-        <div className="mw-track-list">
+        <h3 style={{ fontSize: '13px', letterSpacing: '0.2em', color: 'rgba(255,255,255,0.3)', textTransform: 'uppercase', marginBottom: '24px' }}>
+          Shared Playlist
+        </h3>
+
+        <div>
           {result.tracks.map((track: Track) => (
             <a key={track.id} href={track.spotifyUrl} target="_blank" rel="noopener noreferrer" className="mw-track">
               <img src={track.albumImage || ''} alt="" className="mw-album-art" />
-              <div style={{flex:1, minWidth:0}}>
-                <div style={{fontSize:'15px', fontWeight:600, marginBottom:4, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis'}}>{track.name}</div>
-                <div style={{fontSize:'13px', opacity:0.4, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis'}}>{track.artist} · {track.album}</div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: '15px', fontWeight: 600, marginBottom: 4, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {track.name}
+                </div>
+                <div style={{ fontSize: '13px', opacity: 0.4, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {track.artist} · {track.album}
+                </div>
               </div>
-              <div style={{opacity: 0.3, fontSize: 12}}>iTunes ↗</div>
+              <div style={{ opacity: 0.3, fontSize: 12 }}>iTunes ↗</div>
             </a>
           ))}
         </div>
