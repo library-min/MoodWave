@@ -14,9 +14,8 @@ export interface HistoryEntry {
   created_at: string
 }
 
-const supabase = createClient()
-
 export async function saveEntry(entry: Omit<HistoryEntry, 'id' | 'user_id' | 'created_at'>) {
+  const supabase = createClient()
   const { data: { session } } = await supabase.auth.getSession()
   if (!session) return
 
@@ -28,6 +27,7 @@ export async function saveEntry(entry: Omit<HistoryEntry, 'id' | 'user_id' | 'cr
 }
 
 export async function getEntries() {
+  const supabase = createClient()
   const { data, error } = await supabase
     .from('mood_history')
     .select('*')
@@ -38,6 +38,7 @@ export async function getEntries() {
 }
 
 export async function getEntryByDate(date: string) {
+  const supabase = createClient()
   const { data, error } = await supabase
     .from('mood_history')
     .select('*')
@@ -49,6 +50,7 @@ export async function getEntryByDate(date: string) {
 }
 
 export async function deleteEntry(id: string) {
+  const supabase = createClient()
   const { error } = await supabase
     .from('mood_history')
     .delete()
